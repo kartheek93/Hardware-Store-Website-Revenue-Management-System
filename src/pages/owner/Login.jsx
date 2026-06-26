@@ -6,7 +6,7 @@ import { useAuth } from '@/context/AuthContext'
 import { useToast } from '@/context/ToastContext'
 import { cn, STORE } from '@/lib/utils'
 import { StoreLogo } from '@/components/shared/icons'
-import { isOwner } from '@/config/owners'
+import { checkIsOwner } from '@/config/owners'
 
 // Gradient for the sliding 3D panel. Swap this one line for the brand look:
 //   brand orange → 'linear-gradient(135deg, #D85A30 0%, #BA7517 100%)'
@@ -106,13 +106,19 @@ export default function Login() {
 
   // Redirect on auth success if authorized owner
   useEffect(() => {
-    if (!authLoading && user) {
-      if (isOwner(user)) {
+    if (authLoading || !user) return
+    let active = true
+    checkIsOwner(user).then((ok) => {
+      if (!active) return
+      if (ok) {
         navigate(from, { replace: true })
       } else {
         setError('Access Denied: You do not have owner privileges.')
         supabase.auth.signOut()
       }
+    })
+    return () => {
+      active = false
     }
   }, [authLoading, user, from, navigate])
 
@@ -154,7 +160,7 @@ export default function Login() {
       
       const loggedUser = data?.user
       if (loggedUser) {
-        if (isOwner(loggedUser)) {
+        if (await checkIsOwner(loggedUser)) {
           navigate(from, { replace: true })
         } else {
           setError('Access Denied: You do not have owner privileges.')
@@ -241,7 +247,7 @@ export default function Login() {
 
       const loggedUser = data?.user
       if (loggedUser) {
-        if (isOwner(loggedUser)) {
+        if (await checkIsOwner(loggedUser)) {
           navigate(from, { replace: true })
         } else {
           setError('Access Denied: You do not have owner privileges.')
