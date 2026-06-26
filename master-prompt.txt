@@ -1,0 +1,562 @@
+================================================================
+  MAHAIRASYSTEM — MASTER PROMPT FOR CLAUDE CODE
+  Sri Manikanta Paints, Iron & Hardware
+  Aurora Institute of Technology — Industry Internship 2025-26
+  Deadline: 30th June 2026
+================================================================
+
+You are building MahairaSystem — a unified web application for
+Sri Manikanta Paints, Iron & Hardware, a hardware store in Hyderabad.
+
+This is ONE React application deployed to ONE URL. It has two layers:
+  1. Public website — visible to all customers, no login required
+  2. Owner dashboard — login-protected, only the store owner
+
+Read this entire prompt before writing any code.
+
+
+================================================================
+  TECH STACK — USE EXACTLY THIS, NO SUBSTITUTIONS
+================================================================
+
+Frontend:        React 18 + Vite
+Routing:         React Router v6
+Styling:         Tailwind CSS v3 + shadcn/ui
+UI Components:   21st.dev components (shadcn/ui based) — see below
+Database:        Supabase (PostgreSQL)
+Auth:            Supabase Auth — email + password
+File Storage:    Supabase Storage (bucket: "product-images")
+PDF/Print:       jsPDF + jspdf-autotable
+Charts:          Recharts
+Deployment:      Vercel
+Package manager: npm
+
+DO NOT use: Express, Node.js server, Flask, JWT libraries (Supabase
+handles auth), axios (use Supabase JS SDK + fetch).
+
+
+================================================================
+  PROJECT STRUCTURE
+================================================================
+
+mahairasystem/
+├── src/
+│   ├── components/
+│   │   ├── public/          ← website components (navbar, hero etc.)
+│   │   ├── owner/           ← dashboard components (sidebar, tables etc.)
+│   │   └── shared/          ← badges, toasts, modals used in both
+│   ├── pages/
+│   │   ├── public/          ← Home.jsx, Products.jsx, About.jsx, Contact.jsx
+│   │   └── owner/           ← Dashboard.jsx, Inventory.jsx, Customers.jsx,
+│   │                           Bills.jsx, NewBill.jsx, Reports.jsx
+│   ├── layouts/
+│   │   ├── PublicLayout.jsx  ← navbar + footer wrapper for public pages
+│   │   └── OwnerLayout.jsx   ← sidebar wrapper for /owner/* pages
+│   ├── lib/
+│   │   ├── supabase.js       ← Supabase client init
+│   │   └── utils.js          ← currency formatter, date helpers
+│   ├── hooks/
+│   │   ├── useAuth.js        ← Supabase auth state hook
+│   │   └── useProducts.js    ← products fetch hook (used by both layers)
+│   ├── context/
+│   │   ├── AuthContext.jsx   ← wraps app with Supabase auth session
+│   │   └── ToastContext.jsx  ← global toast notifications
+│   ├── App.jsx               ← route definitions
+│   └── main.jsx
+├── .env                      ← Supabase keys (never commit)
+├── .env.example              ← template for env vars
+└── vite.config.js
+
+
+================================================================
+  ENVIRONMENT VARIABLES
+================================================================
+
+Create .env file at project root:
+
+  VITE_SUPABASE_URL=your_supabase_project_url
+  VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+
+Create .env.example with the same keys but empty values.
+Add .env to .gitignore.
+
+Initialize Supabase client in src/lib/supabase.js:
+
+  import { createClient } from '@supabase/supabase-js'
+  export const supabase = createClient(
+    import.meta.env.VITE_SUPABASE_URL,
+    import.meta.env.VITE_SUPABASE_ANON_KEY
+  )
+
+
+================================================================
+  SUPABASE DATABASE SCHEMA — CREATE THESE TABLES EXACTLY
+================================================================
+
+Run this SQL in the Supabase SQL editor:
+
+-- Products table
+CREATE TABLE products (
+  id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name        TEXT NOT NULL,
+  category    TEXT NOT NULL CHECK (category IN ('Paints','Iron & Steel','Hardware','Tools')),
+  description TEXT,
+  cost_price  NUMERIC(10,2) NOT NULL,
+  selling_price NUMERIC(10,2) NOT NULL,
+  stock_qty   INTEGER NOT NULL DEFAULT 0,
+  reorder_level INTEGER NOT NULL DEFAULT 5,
+  image_url   TEXT,
+  is_active   BOOLEAN NOT NULL DEFAULT true,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- Customers table
+CREATE TABLE customers (
+  id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name       TEXT NOT NULL,
+  phone      TEXT NOT NULL,
+  address    TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Bills table
+CREATE TABLE bills (
+  id             UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  customer_id    UUID REFERENCES customers(id),
+  subtotal       NUMERIC(10,2) NOT NULL,
+  gst_rate       NUMERIC(5,2) NOT NULL DEFAULT 18,
+  gst_amount     NUMERIC(10,2) NOT NULL,
+  total_amount   NUMERIC(10,2) NOT NULL,
+  payment_status TEXT NOT NULL DEFAULT 'Outstanding'
+                 CHECK (payment_status IN ('Paid','Outstanding','Overdue')),
+  notes          TEXT,
+  created_at     TIMESTAMPTZ DEFAULT now()
+);
+
+-- Bill items table (line items per bill)
+CREATE TABLE bill_items (
+  id           UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  bill_id      UUID REFERENCES bills(id) ON DELETE CASCADE,
+  product_id   UUID REFERENCES products(id),
+  product_name TEXT NOT NULL,   -- snapshot: store name at time of billing
+  unit_price   NUMERIC(10,2) NOT NULL, -- snapshot: price at time of billing
+  quantity     INTEGER NOT NULL,
+  line_total   NUMERIC(10,2) NOT NULL
+);
+
+-- Payments table
+CREATE TABLE payments (
+  id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  bill_id    UUID REFERENCES bills(id) ON DELETE CASCADE,
+  amount_paid NUMERIC(10,2) NOT NULL,
+  paid_at    TIMESTAMPTZ DEFAULT now(),
+  notes      TEXT
+);
+
+
+================================================================
+  SUPABASE ROW LEVEL SECURITY (RLS) — APPLY EXACTLY AS BELOW
+================================================================
+
+Run this SQL in the Supabase SQL editor after creating tables:
+
+-- Enable RLS on all tables
+ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bills     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bill_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payments  ENABLE ROW LEVEL SECURITY;
+
+-- Products: anyone can READ (public catalogue)
+CREATE POLICY "public can read active products"
+  ON products FOR SELECT
+  USING (is_active = true);
+
+-- Products: only authenticated owner can write
+CREATE POLICY "owner can manage products"
+  ON products FOR ALL
+  USING (auth.uid() IS NOT NULL)
+  WITH CHECK (auth.uid() IS NOT NULL);
+
+-- All other tables: owner only
+CREATE POLICY "owner only" ON customers FOR ALL USING (auth.uid() IS NOT NULL);
+CREATE POLICY "owner only" ON bills     FOR ALL USING (auth.uid() IS NOT NULL);
+CREATE POLICY "owner only" ON bill_items FOR ALL USING (auth.uid() IS NOT NULL);
+CREATE POLICY "owner only" ON payments  FOR ALL USING (auth.uid() IS NOT NULL);
+
+-- Supabase Storage: create bucket "product-images" as PUBLIC
+-- Images are public-read, authenticated-write (set in Supabase dashboard)
+
+
+================================================================
+  AUTHENTICATION — SUPABASE AUTH
+================================================================
+
+Method: Email + password (supabase.auth.signInWithPassword)
+
+IMPORTANT: There is NO signup page in the app. The owner account
+is created manually in the Supabase Dashboard under Authentication
+→ Users → Add User. The app only has a login page.
+
+AuthContext (src/context/AuthContext.jsx):
+- On mount, call supabase.auth.getSession() to restore session
+- Listen to supabase.auth.onAuthStateChange for live updates
+- Expose: { session, user, loading, signOut }
+
+ProtectedRoute component:
+- Wraps all /owner/* routes
+- If loading: show spinner
+- If no session: redirect to /owner/login
+- If session exists: render children
+
+Login page (/owner/login):
+- Uses supabase.auth.signInWithPassword({ email, password })
+- On success: navigate to /owner/dashboard
+- On error: show "Invalid email or password" inline
+- No signup link, no forgot password visible
+
+
+================================================================
+  ROUTING (src/App.jsx)
+================================================================
+
+Public routes (no auth, use PublicLayout):
+  /                   → Home
+  /products           → Products (accepts ?category= query param)
+  /about              → About
+  /contact            → Contact
+  /owner/login        → Login (no layout wrapper)
+
+Owner routes (wrapped in ProtectedRoute + OwnerLayout):
+  /owner/dashboard    → Dashboard
+  /owner/inventory    → Inventory (product CRUD)
+  /owner/customers    → Customers (customer CRUD)
+  /owner/bills        → Bills list + mark paid
+  /owner/bills/new    → New bill generation
+  /owner/reports      → Reports (charts)
+
+Catch-all: redirect / to home
+
+
+================================================================
+  PUBLIC WEBSITE — PAGE REQUIREMENTS
+================================================================
+
+HOME PAGE (/)
+Sections in order:
+1. Announcement banner (dismissible, text editable in one place)
+2. Navbar (sticky)
+3. Hero section (headline, subheadline, two CTA buttons)
+4. Product categories grid (4 cards: Paints, Iron & Steel, Hardware, Tools)
+5. Brand logos strip (placeholder logos)
+6. WhatsApp CTA section
+7. Testimonials (3 placeholder reviews)
+8. Footer
+
+PRODUCTS PAGE (/products)
+- Fetch products from Supabase WHERE is_active = true
+- Show category filter tabs: All | Paints | Iron & Steel | Hardware | Tools
+- If ?category= param is present, pre-select that tab
+- Product cards: image (or placeholder), name, category badge, selling price
+- Search bar to filter by product name
+- Loading skeleton while fetching
+- Empty state if no products in a category
+
+ABOUT PAGE (/about)
+- Store name, years in business (placeholder)
+- Service area: Hyderabad and surrounding areas
+- Why choose us: 3-4 bullet points
+- Contact CTA at bottom
+
+CONTACT PAGE (/contact)
+- Store address (placeholder — owner will fill in)
+- Phone number (placeholder)
+- WhatsApp button
+- Google Maps embed (use placeholder iframe, owner will add real Maps URL)
+- Opening hours (placeholder)
+
+IMPORTANT — Product sync:
+The /products page must fetch live from Supabase on every load.
+When the owner adds, edits, or deletes a product in the dashboard,
+the change reflects on the public /products page immediately on
+the next customer page load. This is the core product sync mechanism.
+No caching that prevents this. No static product data in the code.
+
+
+================================================================
+  OWNER DASHBOARD — PAGE REQUIREMENTS
+================================================================
+
+DASHBOARD (/owner/dashboard)
+KPI cards (fetch from Supabase):
+- Today's Sales: SUM of bills.total_amount WHERE DATE(created_at) = today AND payment_status = 'Paid'
+- Monthly Sales: SUM for current month
+- Outstanding Dues: SUM WHERE payment_status = 'Outstanding'
+- Low Stock Count: COUNT of products WHERE stock_qty <= reorder_level AND is_active = true
+Alert banners below KPIs:
+- If low stock count > 0: show warning alert with link to /owner/inventory
+- If overdue bills exist: show danger alert with link to /owner/bills
+
+INVENTORY (/owner/inventory)
+- Data table of all products (including inactive)
+- Columns: Image, Name, Category, Selling Price, Stock, Status, Actions
+- Add Product button → opens product form in slide-over/modal
+- Edit row → opens pre-filled product form
+- Delete row → soft delete: SET is_active = false (NOT hard delete)
+  Show confirmation dialog before deleting
+- Stock badge: green if ok, orange if low, red if 0
+- Product image upload: upload to Supabase Storage "product-images" bucket,
+  store returned public URL in products.image_url
+
+CUSTOMERS (/owner/customers)
+- Data table: Name, Phone, Address, Total Bills, Date Added, Actions
+- Add Customer button → opens customer form
+- Edit/Delete customer
+- Click customer name → show their bill history in a modal
+
+BILLS (/owner/bills)
+- Data table: Bill #, Customer, Date, Total, Status, Actions
+- Status badges: Paid (green), Outstanding (amber), Overdue (red)
+- Mark as Paid button per row → updates payment_status to 'Paid',
+  creates a record in payments table
+- View Bill button → opens bill detail modal with print option
+- New Bill button → navigates to /owner/bills/new
+- Auto-mark bills as Overdue if payment_status = 'Outstanding' AND
+  created_at < now() - interval '30 days'
+
+BILL GENERATION (/owner/bills/new)
+Step 1 — Select customer (searchable dropdown from customers table)
+Step 2 — Add line items:
+  - Product selector (searchable, shows name + stock + price)
+  - Quantity input (validate: cannot exceed stock_qty)
+  - Unit price auto-filled from products.selling_price
+  - Line total = qty × unit_price (auto-calculated)
+  - Add/remove rows
+Step 3 — Totals (auto-calculated, shown live):
+  - Subtotal = sum of all line totals
+  - GST (18% default, editable) = subtotal × gst_rate / 100
+  - Grand Total = subtotal + gst_amount
+Step 4 — Payment status: Paid or Outstanding
+Step 5 — "Generate Bill" button:
+  - INSERT into bills table
+  - INSERT all rows into bill_items table
+  - UPDATE products.stock_qty -= quantity for each item
+  - Show success toast
+  - Open printable bill view / generate PDF using jsPDF
+
+BILL PDF format (jsPDF):
+  Header: Store name, address, phone, GST number (placeholder)
+  Bill details: Bill number, date, customer name, phone, address
+  Items table: #, Product, Qty, Unit Price, Total
+  Totals: Subtotal, GST (rate%), Grand Total
+  Footer: "Thank you for your business"
+
+REPORTS (/owner/reports)
+Tab 1 — Daily (last 7 days):
+  Bar chart: X axis = date, Y axis = total sales in ₹
+  Data: GROUP BY DATE(created_at) on bills WHERE payment_status = 'Paid'
+
+Tab 2 — Monthly (last 6 months):
+  Bar chart: X axis = month, Y axis = total sales in ₹
+
+Tab 3 — Top Products:
+  Table: Product name, Units sold, Revenue generated
+  Data: JOIN bill_items → GROUP BY product_name → ORDER BY qty DESC
+
+All charts use Recharts. All data fetched from Supabase.
+
+
+================================================================
+  PRODUCT IMAGE HANDLING
+================================================================
+
+Owner adds a product:
+1. Owner picks an image file in the product form
+2. Upload to Supabase Storage: supabase.storage
+   .from('product-images')
+   .upload(`${productId}-${Date.now()}`, file)
+3. Get public URL: supabase.storage
+   .from('product-images')
+   .getPublicUrl(filePath)
+4. Save the public URL to products.image_url
+
+Public catalogue:
+- Render <img src={product.image_url} /> if image_url is not null
+- Fallback: show a grey placeholder with the product initial if no image
+
+Deleting a product (soft delete):
+- Set is_active = false in the database
+- Do NOT delete the image from storage (bill history may reference it)
+
+
+================================================================
+  21ST.DEV COMPONENT INTEGRATION
+================================================================
+
+All UI components come from 21st.dev (shadcn/ui based).
+The section-specific prompts are in 21stdev-section-prompts.txt.
+
+When integrating 21st.dev components:
+- Install via: npx shadcn@latest add "<21st.dev component URL>"
+- Components land in src/components/ui/
+- Customize colors to match a hardware store feel:
+  Primary color: deep orange (#D85A30) — earthy, hardware feel
+  Secondary: slate gray (#5F5E5A)
+  Accent: warm amber (#BA7517)
+  Background: off-white (#FAFAF8)
+- Apply customization in tailwind.config.js under theme.extend.colors
+
+Required 21st.dev components (see 21stdev-section-prompts.txt for
+individual prompts):
+  Public:  Navbar, Hero, Feature Cards, Brand Strip, CTA Section,
+           Testimonials, Announcement Banner, Footer
+  Owner:   Sign In Form, Sidebar, KPI Cards, Data Table,
+           Product Form, Customer Form, Bill Form, Status Badges,
+           Alert/Toast, Report Tabs, Searchable Selects
+
+
+================================================================
+  CURRENCY AND NUMBER FORMATTING
+================================================================
+
+All prices displayed in Indian Rupees (₹).
+Use this formatter throughout the app:
+
+  const formatCurrency = (amount) =>
+    new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 2
+    }).format(amount)
+
+Example output: ₹1,25,000.00
+
+
+================================================================
+  MOBILE RESPONSIVENESS REQUIREMENTS
+================================================================
+
+Public website: fully responsive, mobile-first
+Owner dashboard: must work on tablet (min 768px) at shop counter
+  - Sidebar collapses to icon-only on tablet
+  - Tables are horizontally scrollable on small screens
+  - Bill generation form stacks vertically on tablet
+  - KPI cards: 2-column grid on tablet, 4-column on desktop
+
+
+================================================================
+  NON-FUNCTIONAL REQUIREMENTS
+================================================================
+
+- All Supabase queries must have error handling with try/catch
+- Show loading skeletons while data is being fetched
+- Show empty state components when tables have no data
+- All forms must have client-side validation before Supabase calls
+- Billing calculations (subtotal, GST, total) must be precise:
+  use toFixed(2) everywhere, never display raw JS float math
+- All delete actions must show a confirmation dialog before executing
+- The owner must be able to log out from any dashboard page
+- After login session expires, redirect to /owner/login automatically
+
+
+================================================================
+  WHAT IS OUT OF SCOPE — DO NOT BUILD THESE
+================================================================
+
+- Online payments or payment gateway integration
+- Customer login or customer accounts
+- Multi-store or multi-user management
+- Email notifications or SMS
+- Real-time updates (websockets) — page refresh is sufficient
+- Signup page (owner account is created in Supabase dashboard)
+
+
+================================================================
+  WEEK-BY-WEEK BUILD ORDER (follow this sequence)
+================================================================
+
+WEEK 1:
+  [ ] Vite + React + Tailwind + shadcn/ui setup
+  [ ] Supabase project created, tables and RLS applied
+  [ ] .env configured, Supabase client initialized
+  [ ] AuthContext and ProtectedRoute implemented
+  [ ] PublicLayout and OwnerLayout scaffolded
+  [ ] React Router routes defined
+  [ ] Navbar and Footer (from 21st.dev)
+  [ ] Owner login page working with Supabase Auth
+  [ ] Owner sidebar with navigation
+  [ ] Products table + Inventory CRUD (add/edit/soft-delete)
+
+WEEK 2:
+  [ ] Home page: Hero, Categories, CTA, Testimonials sections
+  [ ] Public /products page fetching live from Supabase
+  [ ] About and Contact pages
+  [ ] Customer CRUD in dashboard
+  [ ] Bill generation form with calculations
+  [ ] Bill saved to Supabase, stock qty updated
+
+WEEK 3:
+  [ ] Bill list page with status badges
+  [ ] Mark bill as paid functionality
+  [ ] Dashboard KPI cards with real data
+  [ ] Alert banners (low stock, overdue)
+  [ ] Reports page with Recharts (daily + monthly + top products)
+  [ ] jsPDF bill generation and print view
+  [ ] Product image upload via Supabase Storage
+
+WEEK 4:
+  [ ] Full end-to-end testing of product sync
+    (owner adds product → visible on public /products immediately)
+  [ ] Mobile responsiveness audit on all pages
+  [ ] Deploy to Vercel
+  [ ] Add Supabase environment variables to Vercel dashboard
+  [ ] Final testing on live URL
+
+
+================================================================
+  DEPLOYMENT CHECKLIST (Vercel)
+================================================================
+
+1. Push code to GitHub (make sure .env is in .gitignore)
+2. Import repo in Vercel
+3. Set environment variables in Vercel dashboard:
+     VITE_SUPABASE_URL = your value
+     VITE_SUPABASE_ANON_KEY = your value
+4. Build command: npm run build
+5. Output directory: dist
+6. Add the Vercel deployment URL to Supabase Auth
+   → Dashboard → Authentication → URL Configuration
+   → Add to "Redirect URLs": https://your-app.vercel.app/**
+
+
+================================================================
+  FINAL CHECKLIST BEFORE DEMO
+================================================================
+
+Public layer:
+  [ ] Home page loads with all sections
+  [ ] /products page shows real products from Supabase
+  [ ] Category filter works
+  [ ] WhatsApp button opens correct number
+  [ ] Google Maps shows on /contact
+  [ ] Mobile layout works on phone screen
+
+Owner layer:
+  [ ] Login works with owner credentials
+  [ ] Can add a new product with image
+  [ ] New product appears immediately on public /products page
+  [ ] Can edit product — change reflects publicly
+  [ ] Can soft-delete product — disappears from public page
+  [ ] Can add a customer
+  [ ] Can generate a bill, download PDF
+  [ ] Can mark bill as paid
+  [ ] Dashboard KPI numbers are accurate
+  [ ] Reports charts show correct data
+  [ ] Logout works and redirects to /owner/login
+  [ ] Protected routes redirect to login if not authenticated
+
+
+================================================================
+  END OF MASTER PROMPT
+  Share this file + 21stdev-section-prompts.txt with Claude Code
+================================================================
